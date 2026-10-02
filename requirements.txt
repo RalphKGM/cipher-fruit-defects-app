@@ -1,0 +1,9 @@
+# CPU-only PyTorch on Linux (Streamlit Community Cloud, Python 3.11). Other systems use the standard build.
+torch @ https://download.pytorch.org/whl/cpu/torch-2.8.0%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl ; sys_platform == "linux" and python_version == "3.11"
+torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.23.0%2Bcpu-cp311-cp311-manylinux_2_28_x86_64.whl ; sys_platform == "linux" and python_version == "3.11"
+ultralytics==8.4.126
+streamlit>=1.50
+pandas
+opencv-python-headless
+pillow
+pyyaml
