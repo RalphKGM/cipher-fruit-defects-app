@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
+
+# Ultralytics replaces Image.open with a version that tries to install a HEIC plugin on bad files
+_pil_open = Image.open
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
@@ -63,7 +66,11 @@ def color_for(name: str, index: int = 0) -> tuple:
 
 def load_image(source) -> np.ndarray:
     """Open a path or file object as an upright RGB array."""
-    image = Image.open(source)
+    try:
+        image = _pil_open(source)
+        image.load()
+    except Exception as error:
+        raise UnidentifiedImageError(str(error)) from error
     image = ImageOps.exif_transpose(image)
     return np.array(image.convert("RGB"))
 
