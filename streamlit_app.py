@@ -26,6 +26,7 @@ from inference import (  # noqa: E402
 
 SAMPLES_DIR = ROOT / "app" / "samples"
 TEST_SET_DIR = ROOT / "app" / "test_set"
+VALID_SET_DIR = ROOT / "app" / "valid_set"
 UPLOAD_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
 MAX_BATCH = 30
 
@@ -146,17 +147,19 @@ def show_single(source, name):
                        file_name=f"{Path(name).stem}_defects.png", mime="image/png", key=f"dl_{name}")
 
 
-def test_set_items(fruit_choice: str):
-    """Built-in test images with their team label files."""
+def test_set_items(fruit_choice: str, with_valid: bool = False):
+    """Built-in test (and optionally validation) images with their team label files."""
     sets = ["apple", "tomato"] if fruit_choice.startswith("Both") else [fruit_choice.lower()]
+    splits = [("test", TEST_SET_DIR)] + ([("validation", VALID_SET_DIR)] if with_valid else [])
     per_set = []
     for name in sets:
-        folder = TEST_SET_DIR / name
         found = []
-        for img in sorted((folder / "images").glob("*")):
-            if img.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                label = folder / "labels" / (img.stem + ".txt")
-                found.append((img.name, img, label.read_text() if label.is_file() else None))
+        for split, root in splits:
+            folder = root / name
+            for img in sorted((folder / "images").glob("*")):
+                if img.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    label = folder / "labels" / (img.stem + ".txt")
+                    found.append((img.name, img, label.read_text() if label.is_file() else None, split))
         per_set.append(found)
     # Alternate fruits so a short run of the combined model shows both
     items = []
@@ -166,15 +169,16 @@ def test_set_items(fruit_choice: str):
 
 
 def show_batch():
-    source = st.radio("Images", ["Built-in test set", "Upload my own"], horizontal=True,
+    source = st.radio("Images", ["Built-in test set", "Built-in test + validation set", "Upload my own"],
+                      horizontal=True,
                       key="batch_source")
     label_format = list(LABEL_FORMATS)[0]
     if source.startswith("Built-in"):
-        pool = test_set_items(fruit)
+        pool = test_set_items(fruit, with_valid="validation" in source)
         if not pool:
             st.warning("The built-in test set is not available.")
             return
-        count = st.slider("Number of test images", 1, len(pool), min(20, len(pool)),
+        count = st.slider("Number of images", 1, len(pool), min(20, len(pool)),
                           help="About 1 to 2 seconds per image on CPU")
         if st.toggle("Random", key="batch_random"):
             # New draw each time the toggle is switched on
@@ -183,7 +187,9 @@ def show_batch():
         else:
             st.session_state.pop("batch_seed", None)
             items = pool[:count]
-        st.caption(f"{len(pool)} held-out test images for {fruit.lower()}.")
+        n_test = sum(1 for item in pool if item[3] == "test")
+        st.caption(f"{n_test} test" + (f" and {len(pool) - n_test} validation" if len(pool) > n_test else "")
+                   + f" images for {fruit.lower()}.")
     else:
         files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score "
                                  "each image", type=UPLOAD_TYPES + ["txt"], accept_multiple_files=True,
@@ -207,16 +213,17 @@ def show_batch():
         items = []
         for f in images:
             lf = label_files.get(Path(f.name).stem)
-            items.append((f.name, f, lf.getvalue().decode("utf-8", errors="ignore") if lf is not None else None))
+            items.append((f.name, f, lf.getvalue().decode("utf-8", errors="ignore") if lf is not None else None,
+                          None))
 
     run_key = (fruit, conf, fruit_model is not None, label_format, source,
-               tuple(getattr(src, "file_id", str(src)) for _, src, _ in items))
+               tuple(getattr(src, "file_id", str(src)) for _, src, _, _ in items))
     if st.session_state.get("batch_key") != run_key:
         if not st.button(f"Run on {len(items)} images", type="primary"):
             return
         results = []
         bar = st.progress(0.0)
-        for i, (name, src, label_text) in enumerate(items):
+        for i, (name, src, label_text, split) in enumerate(items):
             bar.progress(i / len(items), text=f"Segmenting {name} ({i + 1} of {len(items)})")
             try:
                 image = load_image(src)
@@ -230,7 +237,7 @@ def show_batch():
             labels = None
             if label_text is not None:
                 labels = read_labels(label_text, image.shape[1], image.shape[0], LABEL_FORMATS[label_format])
-            results.append({"name": name, "prediction": prediction, "labels": labels,
+            results.append({"name": name, "split": split, "prediction": prediction, "labels": labels,
                             "scores": score(prediction, labels) if labels is not None else {}, "note": ""})
         bar.empty()
         st.session_state.batch_key = run_key
@@ -247,9 +254,12 @@ def show_batch():
         shown = [d for d in prediction.detections if visible.get(d.class_name, True)]
         labels = sorted({CLASS_LABELS.get(d.class_name, d.class_name) for d in shown})
         top = max((d.confidence for d in shown), default=None)
-        row = {"File": r["name"], "Fruit found": fruit_status(prediction), "Defect regions": len(shown),
+        row = {"File": r["name"]}
+        if r.get("split"):
+            row["Split"] = r["split"]
+        row.update({"Fruit found": fruit_status(prediction), "Defect regions": len(shown),
                "Top confidence": None if top is None else round(top, 2),
-               "Defects": ", ".join(labels) or "None", "% of fruit damaged": damaged_share(prediction, shown)}
+               "Defects": ", ".join(labels) or "None", "% of fruit damaged": damaged_share(prediction, shown)})
         if any(x.get("labels") is not None for x in results):
             if r["labels"] is None:
                 row["Note"] = "No label file"
