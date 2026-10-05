@@ -165,7 +165,7 @@ def test_set_items(fruit_choice: str):
 
 
 def show_batch():
-    source = st.radio("Images", ["Built-in test set (with team labels)", "Upload my own"], horizontal=True,
+    source = st.radio("Images", ["Built-in test set", "Upload my own"], horizontal=True,
                       key="batch_source")
     label_format = list(LABEL_FORMATS)[0]
     if source.startswith("Built-in"):
@@ -176,8 +176,7 @@ def show_batch():
         count = st.slider("Number of test images", 1, len(pool), min(20, len(pool)),
                           help="About 1 to 2 seconds per image on CPU")
         items = pool[:count]
-        st.caption(f"{len(pool)} held-out test images for {fruit.lower()}. The model never saw them in training "
-                   "or model selection.")
+        st.caption(f"{len(pool)} held-out test images for {fruit.lower()}.")
     else:
         files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score "
                                  "each image", type=UPLOAD_TYPES + ["txt"], accept_multiple_files=True,
@@ -304,8 +303,6 @@ def show_batch():
         if current.get("labels") is None:
             st.caption("No team label for this image, so mAP50 and IoU cannot be computed. Use the built-in test set "
                        "or upload the matching label .txt files.")
-        elif current.get("labels") == []:
-            st.caption("This image has no labeled defect, so mAP50 and IoU are not defined.")
         if shown:
             fruit_px = prediction.fruit_mask.sum() if prediction.fruit_mask is not None else 0
             st.dataframe(pd.DataFrame([{
