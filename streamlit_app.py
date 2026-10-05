@@ -1,5 +1,6 @@
 """Streamlit demo for post-harvest fruit defect segmentation."""
 import io
+import random
 import sys
 import zipfile
 from pathlib import Path
@@ -175,7 +176,13 @@ def show_batch():
             return
         count = st.slider("Number of test images", 1, len(pool), min(20, len(pool)),
                           help="About 1 to 2 seconds per image on CPU")
-        items = pool[:count]
+        if st.toggle("Random", key="batch_random"):
+            # New draw each time the toggle is switched on
+            seed = st.session_state.setdefault("batch_seed", random.randrange(1_000_000))
+            items = random.Random(seed).sample(pool, count)
+        else:
+            st.session_state.pop("batch_seed", None)
+            items = pool[:count]
         st.caption(f"{len(pool)} held-out test images for {fruit.lower()}.")
     else:
         files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score "
