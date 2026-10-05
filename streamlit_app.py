@@ -24,6 +24,7 @@ from inference import (  # noqa: E402
 )
 
 SAMPLES_DIR = ROOT / "app" / "samples"
+TEST_SET_DIR = ROOT / "app" / "test_set"
 UPLOAD_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
 MAX_BATCH = 30
 
@@ -144,51 +145,86 @@ def show_single(source, name):
                        file_name=f"{Path(name).stem}_defects.png", mime="image/png", key=f"dl_{name}")
 
 
-def show_batch():
-    files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score each image",
-                             type=UPLOAD_TYPES + ["txt"], accept_multiple_files=True, key="batch_files")
-    if not files:
-        st.info("Select several photos at once. To see per-image mAP50 and IoU, also select the matching label "
-                "files from the dataset `test/labels` folder.")
-        return
-    label_files = {Path(f.name).stem: f for f in files if f.name.lower().endswith(".txt")}
-    images = [f for f in files if not f.name.lower().endswith(".txt")]
-    if not images:
-        st.warning("Only label files were selected. Add the images too.")
-        return
-    if len(images) > MAX_BATCH:
-        st.warning(f"Only the first {MAX_BATCH} images are processed.")
-        images = images[:MAX_BATCH]
-    label_format = None
-    if label_files:
-        formats = list(LABEL_FORMATS)
-        label_format = st.selectbox("Label format", formats, index=1 if fruit.startswith("Both") else 0,
-                                    help="Class ids differ between the single-fruit and combined datasets")
+def test_set_items(fruit_choice: str):
+    """Built-in test images with their team label files."""
+    sets = ["apple", "tomato"] if fruit_choice.startswith("Both") else [fruit_choice.lower()]
+    per_set = []
+    for name in sets:
+        folder = TEST_SET_DIR / name
+        found = []
+        for img in sorted((folder / "images").glob("*")):
+            if img.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                label = folder / "labels" / (img.stem + ".txt")
+                found.append((img.name, img, label.read_text() if label.is_file() else None))
+        per_set.append(found)
+    # Alternate fruits so a short run of the combined model shows both
+    items = []
+    for i in range(max(map(len, per_set), default=0)):
+        items += [found[i] for found in per_set if i < len(found)]
+    return items
 
-    run_key = (fruit, conf, fruit_model is not None, label_format,
-               tuple(getattr(f, "file_id", f.name) for f in files))
+
+def show_batch():
+    source = st.radio("Images", ["Built-in test set (with team labels)", "Upload my own"], horizontal=True,
+                      key="batch_source")
+    label_format = list(LABEL_FORMATS)[0]
+    if source.startswith("Built-in"):
+        pool = test_set_items(fruit)
+        if not pool:
+            st.warning("The built-in test set is not available.")
+            return
+        count = st.slider("Number of test images", 1, len(pool), min(20, len(pool)),
+                          help="About 1 to 2 seconds per image on CPU")
+        items = pool[:count]
+        st.caption(f"{len(pool)} held-out test images for {fruit.lower()}. The model never saw them in training "
+                   "or model selection.")
+    else:
+        files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score "
+                                 "each image", type=UPLOAD_TYPES + ["txt"], accept_multiple_files=True,
+                                 key="batch_files")
+        if not files:
+            st.info("Select several photos at once. Without label files the app shows predictions and confidence "
+                    "but cannot compute mAP50 or IoU.")
+            return
+        label_files = {Path(f.name).stem: f for f in files if f.name.lower().endswith(".txt")}
+        images = [f for f in files if not f.name.lower().endswith(".txt")]
+        if not images:
+            st.warning("Only label files were selected. Add the images too.")
+            return
+        if len(images) > MAX_BATCH:
+            st.warning(f"Only the first {MAX_BATCH} images are processed.")
+            images = images[:MAX_BATCH]
+        if label_files:
+            label_format = st.selectbox("Label format", list(LABEL_FORMATS),
+                                        index=1 if fruit.startswith("Both") else 0,
+                                        help="Class ids differ between the single-fruit and combined datasets")
+        items = []
+        for f in images:
+            lf = label_files.get(Path(f.name).stem)
+            items.append((f.name, f, lf.getvalue().decode("utf-8", errors="ignore") if lf is not None else None))
+
+    run_key = (fruit, conf, fruit_model is not None, label_format, source,
+               tuple(getattr(src, "file_id", str(src)) for _, src, _ in items))
     if st.session_state.get("batch_key") != run_key:
-        if not st.button(f"Run on {len(images)} images", type="primary"):
+        if not st.button(f"Run on {len(items)} images", type="primary"):
             return
         results = []
         bar = st.progress(0.0)
-        for i, f in enumerate(images):
-            bar.progress(i / len(images), text=f"Segmenting {f.name} ({i + 1} of {len(images)})")
+        for i, (name, src, label_text) in enumerate(items):
+            bar.progress(i / len(items), text=f"Segmenting {name} ({i + 1} of {len(items)})")
             try:
-                image = load_image(f)
+                image = load_image(src)
             except (UnidentifiedImageError, OSError):
-                results.append({"name": f.name, "prediction": None, "note": "Could not be read"})
+                results.append({"name": name, "prediction": None, "note": "Could not be read"})
                 continue
             if min(image.shape[:2]) < 32:
-                results.append({"name": f.name, "prediction": None, "note": "Too small"})
+                results.append({"name": name, "prediction": None, "note": "Too small"})
                 continue
             prediction = predict(defect_model, image, conf=conf, fruit_model=fruit_model)
             labels = None
-            label_file = label_files.get(Path(f.name).stem)
-            if label_file is not None:
-                text = label_file.getvalue().decode("utf-8", errors="ignore")
-                labels = read_labels(text, image.shape[1], image.shape[0], LABEL_FORMATS[label_format])
-            results.append({"name": f.name, "prediction": prediction, "labels": labels,
+            if label_text is not None:
+                labels = read_labels(label_text, image.shape[1], image.shape[0], LABEL_FORMATS[label_format])
+            results.append({"name": name, "prediction": prediction, "labels": labels,
                             "scores": score(prediction, labels) if labels is not None else {}, "note": ""})
         bar.empty()
         st.session_state.batch_key = run_key
@@ -204,9 +240,11 @@ def show_batch():
             continue
         shown = [d for d in prediction.detections if visible.get(d.class_name, True)]
         labels = sorted({CLASS_LABELS.get(d.class_name, d.class_name) for d in shown})
+        top = max((d.confidence for d in shown), default=None)
         row = {"File": r["name"], "Fruit found": fruit_status(prediction), "Defect regions": len(shown),
+               "Top confidence": None if top is None else round(top, 2),
                "Defects": ", ".join(labels) or "None", "% of fruit damaged": damaged_share(prediction, shown)}
-        if label_files:
+        if any(x.get("labels") is not None for x in results):
             if r["labels"] is None:
                 row["Note"] = "No label file"
             elif not r["labels"]:
@@ -254,15 +292,27 @@ def show_batch():
         legend(list(defect_model.names.values()))
         shown = [d for d in prediction.detections if visible.get(d.class_name, True)]
         share = damaged_share(prediction, shown)
-        stats = st.columns(6)
+        stats = st.columns(7)
         stats[0].metric("Defect regions", len(shown))
         stats[1].metric("% of fruit damaged", "-" if share is None else f"{share:.1f}%")
+        top = max((d.confidence for d in shown), default=None)
+        stats[2].metric("Top confidence", "-" if top is None else f"{top:.2f}")
         sc = current.get("scores") or {}
-        for col, key in zip(stats[2:], ["mAP50", "Pixel IoU", "Precision", "Recall"]):
+        for col, key in zip(stats[3:], ["mAP50", "Pixel IoU", "Precision", "Recall"]):
             value = sc.get(key)
             col.metric(key, "-" if value is None else f"{value:.3f}")
-        if current.get("labels") == []:
+        if current.get("labels") is None:
+            st.caption("No team label for this image, so mAP50 and IoU cannot be computed. Use the built-in test set "
+                       "or upload the matching label .txt files.")
+        elif current.get("labels") == []:
             st.caption("This image has no labeled defect, so mAP50 and IoU are not defined.")
+        if shown:
+            fruit_px = prediction.fruit_mask.sum() if prediction.fruit_mask is not None else 0
+            st.dataframe(pd.DataFrame([{
+                "Defect": CLASS_LABELS.get(d.class_name, d.class_name),
+                "Confidence": round(d.confidence, 2),
+                "% of fruit": round(100 * (d.mask & prediction.fruit_mask).sum() / fruit_px, 2) if fruit_px else None,
+            } for d in sorted(shown, key=lambda d: -d.confidence)]), hide_index=True, width="stretch")
 
     st.subheader("All images")
     st.dataframe(table, hide_index=True, width="stretch")
