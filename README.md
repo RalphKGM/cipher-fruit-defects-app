@@ -6,7 +6,7 @@ Tomato Using YOLO26". Group CIPHER, Artificial Intelligence 2, AM3, Mapúa Unive
 Upload a photo of an apple or a tomato. Stage 1 finds the whole fruit and Stage 2 outlines each visible defect:
 bruise or discoloration, rot mold or decay, and surface damage. The app reports each defect and its share of the fruit.
 
-The Batch upload tab runs up to 30 photos at once and exports a CSV table and a ZIP of the masked images.
+The Batch upload tab runs up to 30 photos at once. Previous and Next buttons step through each image. Add the matching YOLO label .txt files (for example from `test/labels`) to see the team label next to the prediction and per-image mAP50, pixel IoU, precision and recall. Results export as a CSV table and a ZIP of masked images.
 
 | Model option | Checkpoints | Test mask mAP50 |
 |---|---|---:|

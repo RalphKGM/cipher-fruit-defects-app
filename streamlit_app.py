@@ -11,6 +11,7 @@ from PIL import Image, UnidentifiedImageError
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from evaluation import LABEL_FORMATS, label_prediction, read_labels, score  # noqa: E402
 from inference import (  # noqa: E402
     CLASS_LABELS,
     FRUITS,
@@ -144,75 +145,138 @@ def show_single(source, name):
 
 
 def show_batch():
-    files = st.file_uploader(f"Select up to {MAX_BATCH} images", type=UPLOAD_TYPES, accept_multiple_files=True,
-                             key="batch_files")
+    files = st.file_uploader(f"Select up to {MAX_BATCH} images. Add their YOLO label .txt files to score each image",
+                             type=UPLOAD_TYPES + ["txt"], accept_multiple_files=True, key="batch_files")
     if not files:
-        st.info("Select several photos at once to segment them in one run.")
+        st.info("Select several photos at once. To see per-image mAP50 and IoU, also select the matching label "
+                "files from the dataset `test/labels` folder.")
         return
-    if len(files) > MAX_BATCH:
+    label_files = {Path(f.name).stem: f for f in files if f.name.lower().endswith(".txt")}
+    images = [f for f in files if not f.name.lower().endswith(".txt")]
+    if not images:
+        st.warning("Only label files were selected. Add the images too.")
+        return
+    if len(images) > MAX_BATCH:
         st.warning(f"Only the first {MAX_BATCH} images are processed.")
-        files = files[:MAX_BATCH]
+        images = images[:MAX_BATCH]
+    label_format = None
+    if label_files:
+        formats = list(LABEL_FORMATS)
+        label_format = st.selectbox("Label format", formats, index=1 if fruit.startswith("Both") else 0,
+                                    help="Class ids differ between the single-fruit and combined datasets")
 
-    run_key = (fruit, conf, fruit_model is not None, tuple(getattr(f, "file_id", f.name) for f in files))
+    run_key = (fruit, conf, fruit_model is not None, label_format,
+               tuple(getattr(f, "file_id", f.name) for f in files))
     if st.session_state.get("batch_key") != run_key:
-        if not st.button(f"Run on {len(files)} images", type="primary"):
+        if not st.button(f"Run on {len(images)} images", type="primary"):
             return
         results = []
         bar = st.progress(0.0)
-        for i, f in enumerate(files):
-            bar.progress(i / len(files), text=f"Segmenting {f.name} ({i + 1} of {len(files)})")
+        for i, f in enumerate(images):
+            bar.progress(i / len(images), text=f"Segmenting {f.name} ({i + 1} of {len(images)})")
             try:
                 image = load_image(f)
             except (UnidentifiedImageError, OSError):
-                results.append((f.name, None, "Could not be read"))
+                results.append({"name": f.name, "prediction": None, "note": "Could not be read"})
                 continue
             if min(image.shape[:2]) < 32:
-                results.append((f.name, None, "Too small"))
+                results.append({"name": f.name, "prediction": None, "note": "Too small"})
                 continue
-            results.append((f.name, predict(defect_model, image, conf=conf, fruit_model=fruit_model), ""))
+            prediction = predict(defect_model, image, conf=conf, fruit_model=fruit_model)
+            labels = None
+            label_file = label_files.get(Path(f.name).stem)
+            if label_file is not None:
+                text = label_file.getvalue().decode("utf-8", errors="ignore")
+                labels = read_labels(text, image.shape[1], image.shape[0], LABEL_FORMATS[label_format])
+            results.append({"name": f.name, "prediction": prediction, "labels": labels,
+                            "scores": score(prediction, labels) if labels is not None else {}, "note": ""})
         bar.empty()
         st.session_state.batch_key = run_key
         st.session_state.batch_results = results
+        st.session_state.batch_index = 0
     results = st.session_state.batch_results
 
-    rows, gallery = [], []
-    for name, prediction, note in results:
+    rows = []
+    for r in results:
+        prediction = r["prediction"]
         if prediction is None:
-            rows.append({"File": name, "Fruit found": "-", "Defect regions": 0, "Defects": "-",
-                         "% of fruit damaged": None, "Time (ms)": None, "Note": note})
+            rows.append({"File": r["name"], "Note": r["note"]})
             continue
         shown = [d for d in prediction.detections if visible.get(d.class_name, True)]
         labels = sorted({CLASS_LABELS.get(d.class_name, d.class_name) for d in shown})
-        rows.append({"File": name, "Fruit found": fruit_status(prediction), "Defect regions": len(shown),
-                     "Defects": ", ".join(labels) or "None", "% of fruit damaged": damaged_share(prediction, shown),
-                     "Time (ms)": round(prediction.seconds * 1000), "Note": note})
-        gallery.append((name, overlay(prediction, visible, alpha=alpha, show_fruit=show_fruit)))
-
+        row = {"File": r["name"], "Fruit found": fruit_status(prediction), "Defect regions": len(shown),
+               "Defects": ", ".join(labels) or "None", "% of fruit damaged": damaged_share(prediction, shown)}
+        if label_files:
+            if r["labels"] is None:
+                row["Note"] = "No label file"
+            elif not r["labels"]:
+                row["Note"] = "No labeled defect"
+            row.update({k: v for k, v in r["scores"].items()})
+        row["Time (ms)"] = round(prediction.seconds * 1000)
+        rows.append(row)
     table = pd.DataFrame(rows)
-    shares = table["% of fruit damaged"].dropna()
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Images", len(rows))
-    metric_cols[1].metric("With defects", int((table["Defect regions"] > 0).sum()))
-    metric_cols[2].metric("Mean % of fruit damaged", f"{shares.mean():.1f}%" if len(shares) else "-")
-    st.dataframe(table, hide_index=True, width="stretch")
 
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Images", len(rows))
+    metric_cols[1].metric("With defects", int((table.get("Defect regions", pd.Series(dtype=int)) > 0).sum()))
+    shares = table.get("% of fruit damaged", pd.Series(dtype=float)).dropna()
+    metric_cols[2].metric("Mean % of fruit damaged", f"{shares.mean():.1f}%" if len(shares) else "-")
+    maps = table.get("mAP50", pd.Series(dtype=float)).dropna()
+    metric_cols[3].metric("Mean per-image mAP50", f"{maps.mean():.3f}" if len(maps) else "-",
+                          help="Average of per-image scores at the current confidence threshold. "
+                               "It is not the official test mAP from the paper")
+
+    viewable = [r for r in results if r["prediction"] is not None]
+    if viewable:
+        index = min(st.session_state.get("batch_index", 0), len(viewable) - 1)
+        nav = st.columns([1, 6, 1])
+        if nav[0].button("◀ Previous", width="stretch", disabled=index == 0):
+            index -= 1
+        if nav[2].button("Next ▶", width="stretch", disabled=index == len(viewable) - 1):
+            index += 1
+        names = [r["name"] for r in viewable]
+        index = nav[1].selectbox("Image", range(len(names)), index=index, format_func=lambda i: f"{i + 1} of "
+                                 f"{len(names)}: {names[i]}", label_visibility="collapsed")
+        st.session_state.batch_index = index
+        current = viewable[index]
+        prediction = current["prediction"]
+        rendered = overlay(prediction, visible, alpha=alpha, show_fruit=show_fruit)
+        if current.get("labels") is not None:
+            cols = st.columns(3)
+            cols[0].image(prediction.image, caption="Input", width="stretch")
+            truth = overlay(label_prediction(prediction, current["labels"]), visible, alpha=alpha, show_fruit=False)
+            cols[1].image(truth, caption="Team label", width="stretch")
+            cols[2].image(rendered, caption="Model prediction", width="stretch")
+        else:
+            cols = st.columns(2)
+            cols[0].image(prediction.image, caption="Input", width="stretch")
+            cols[1].image(rendered, caption="Model prediction", width="stretch")
+        legend(list(defect_model.names.values()))
+        shown = [d for d in prediction.detections if visible.get(d.class_name, True)]
+        share = damaged_share(prediction, shown)
+        stats = st.columns(6)
+        stats[0].metric("Defect regions", len(shown))
+        stats[1].metric("% of fruit damaged", "-" if share is None else f"{share:.1f}%")
+        sc = current.get("scores") or {}
+        for col, key in zip(stats[2:], ["mAP50", "Pixel IoU", "Precision", "Recall"]):
+            value = sc.get(key)
+            col.metric(key, "-" if value is None else f"{value:.3f}")
+        if current.get("labels") == []:
+            st.caption("This image has no labeled defect, so mAP50 and IoU are not defined.")
+
+    st.subheader("All images")
+    st.dataframe(table, hide_index=True, width="stretch")
     zipped = io.BytesIO()
     with zipfile.ZipFile(zipped, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, rendered in gallery:
+        for r in viewable:
             png = io.BytesIO()
-            Image.fromarray(rendered).save(png, format="PNG")
-            archive.writestr(f"{Path(name).stem}_defects.png", png.getvalue())
+            Image.fromarray(overlay(r["prediction"], visible, alpha=alpha, show_fruit=show_fruit)).save(png, "PNG")
+            archive.writestr(f"{Path(r['name']).stem}_defects.png", png.getvalue())
     dl_cols = st.columns(2)
     dl_cols[0].download_button("Download table CSV", table.to_csv(index=False).encode(), file_name="batch_results.csv",
                                mime="text/csv")
     dl_cols[1].download_button("Download masked images ZIP", zipped.getvalue(), file_name="batch_results.zip",
                                mime="application/zip")
-
-    legend(list(defect_model.names.values()))
-    for start in range(0, len(gallery), 4):
-        cols = st.columns(4)
-        for col, (name, rendered) in zip(cols, gallery[start:start + 4]):
-            col.image(rendered, caption=name, width="stretch")
 
 
 upload_tab, sample_tab, batch_tab = st.tabs(["Upload an image", "Use a sample", "Batch upload"])
