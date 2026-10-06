@@ -3,6 +3,7 @@ import io
 import random
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +30,7 @@ TEST_SET_DIR = ROOT / "app" / "test_set"
 VALID_SET_DIR = ROOT / "app" / "valid_set"
 UPLOAD_TYPES = ["jpg", "jpeg", "png", "webp", "bmp"]
 MAX_BATCH = 30
+BATCH_CONF = 0.05  # lowest value of the confidence slider
 
 st.set_page_config(page_title="Fruit Defect Segmentation", layout="wide")
 
@@ -216,7 +218,7 @@ def show_batch():
             items.append((f.name, f, lf.getvalue().decode("utf-8", errors="ignore") if lf is not None else None,
                           None))
 
-    run_key = (fruit, conf, fruit_model is not None, label_format, source,
+    run_key = (fruit, fruit_model is not None, label_format, source,
                tuple(getattr(src, "file_id", str(src)) for _, src, _, _ in items))
     if st.session_state.get("batch_key") != run_key:
         if not st.button(f"Run on {len(items)} images", type="primary"):
@@ -233,21 +235,35 @@ def show_batch():
             if min(image.shape[:2]) < 32:
                 results.append({"name": name, "prediction": None, "note": "Too small"})
                 continue
-            prediction = predict(defect_model, image, conf=conf, fruit_model=fruit_model)
+            # Predict once at the lowest threshold. The slider then filters without a new run
+            prediction = predict(defect_model, image, conf=BATCH_CONF, fruit_model=fruit_model)
             labels = None
             if label_text is not None:
                 labels = read_labels(label_text, image.shape[1], image.shape[0], LABEL_FORMATS[label_format])
             results.append({"name": name, "split": split, "prediction": prediction, "labels": labels,
-                            "scores": score(prediction, labels) if labels is not None else {}, "note": ""})
+                            "note": ""})
         bar.empty()
         st.session_state.batch_key = run_key
         st.session_state.batch_results = results
         st.session_state.batch_index = 0
+        st.session_state.batch_scores = {}
     results = st.session_state.batch_results
+    score_cache = st.session_state.setdefault("batch_scores", {})
+    for r in results:
+        if r["prediction"] is None:
+            continue
+        full = r["prediction"]
+        r["view"] = replace(full, detections=[d for d in full.detections if d.confidence >= conf])
+        r["scores"] = {}
+        if r.get("labels") is not None:
+            key = (r["name"], r.get("split"), conf)
+            if key not in score_cache:
+                score_cache[key] = score(r["view"], r["labels"])
+            r["scores"] = score_cache[key]
 
     rows = []
     for r in results:
-        prediction = r["prediction"]
+        prediction = r.get("view")
         if prediction is None:
             rows.append({"File": r["name"], "Note": r["note"]})
             continue
@@ -293,7 +309,7 @@ def show_batch():
                                  f"{len(names)}: {names[i]}", label_visibility="collapsed")
         st.session_state.batch_index = index
         current = viewable[index]
-        prediction = current["prediction"]
+        prediction = current["view"]
         rendered = overlay(prediction, visible, alpha=alpha, show_fruit=show_fruit)
         if current.get("labels") is not None:
             cols = st.columns(3)
@@ -334,7 +350,7 @@ def show_batch():
     with zipfile.ZipFile(zipped, "w", zipfile.ZIP_DEFLATED) as archive:
         for r in viewable:
             png = io.BytesIO()
-            Image.fromarray(overlay(r["prediction"], visible, alpha=alpha, show_fruit=show_fruit)).save(png, "PNG")
+            Image.fromarray(overlay(r["view"], visible, alpha=alpha, show_fruit=show_fruit)).save(png, "PNG")
             archive.writestr(f"{Path(r['name']).stem}_defects.png", png.getvalue())
     dl_cols = st.columns(2)
     dl_cols[0].download_button("Download table CSV", table.to_csv(index=False).encode(), file_name="batch_results.csv",
